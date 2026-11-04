@@ -74,3 +74,39 @@ class ProductUpdate(BaseModel):
     )
 
     category: str | None = None
+
+class InventoryCreate(BaseModel):
+    product_id: int
+
+    quantity_on_hand: int = Field(
+        ge=0
+    )
+
+    reorder_level: int = Field(
+        default=10,
+        ge=0
+    )
+
+    warehouse_location: str | None = None
+
+class InventoryUpdate(BaseModel):
+    quantity_on_hand: int | None = Field(
+        default=None,
+        ge=0
+    )
+
+    reorder_level: int | None = Field(
+        default=None,
+        ge=0
+    )
+
+    warehouse_location: str | None = None
+
+class OrderItemCreate(BaseModel):
+    product_id: int
+    quantity: int = Field(gt=0)
+
+
+class OrderCreate(BaseModel):
+    customer_name: str = Field(min_length=2, max_length=150)
+    items: list[OrderItemCreate] = Field(min_length=1)

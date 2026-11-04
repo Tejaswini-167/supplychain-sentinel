@@ -2,8 +2,10 @@
 from fastapi import FastAPI
 from sqlalchemy import text
 from app.database import engine
-from app.schemas import SupplierCreate, SupplierUpdate, ProductCreate, ProductUpdate
+from app.schemas import ( SupplierCreate, SupplierUpdate, ProductCreate, ProductUpdate,
+                          InventoryCreate, InventoryUpdate,OrderCreate)
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 
 app = FastAPI(
     title="SupplyChain Sentinel API",
@@ -377,4 +379,223 @@ def get_low_stock():
     return {
         "total_low_stock": len(low_stock_items),
         "low_stock_items": [dict(item) for item in low_stock_items]
+
     }
+@app.post("/inventory", status_code=201)
+def create_inventory(inventory: InventoryCreate):
+
+    product_check = text("""
+    SELECT product_id
+    FROM products
+    WHERE product_id = :product_id
+    """)
+
+    with engine.connect() as connection:
+        product = connection.execute(
+            product_check,
+            {"product_id": inventory.product_id}
+        ).first()
+
+    if product is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Product not found"
+        )
+
+
+    inventory_check = text("""
+    SELECT inventory_id
+    FROM inventory
+    WHERE product_id = :product_id
+    """)
+
+    with engine.connect() as connection:
+        existing_inventory = connection.execute(
+            inventory_check,
+            {"product_id": inventory.product_id}
+        ).first()
+
+    if existing_inventory is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Inventory already exists for this product"
+        )
+
+    query = text("""
+        INSERT INTO inventory
+            (product_id, quantity_on_hand, reorder_level, warehouse_location)
+        VALUES
+            (:product_id, :quantity_on_hand, :reorder_level, :warehouse_location)
+        RETURNING *
+    """)
+
+    try:
+        with engine.begin() as connection:
+            result = connection.execute(
+                query,
+                inventory.model_dump()
+            )
+
+            new_inventory = result.mappings().one()
+
+    except IntegrityError:
+        raise HTTPException(
+            status_code=409,
+            detail="Inventory could not be created because it conflicts with existing data"
+        )
+
+    return {
+        "message": "Inventory created successfully",
+        "inventory": dict(new_inventory)
+    }
+@app.patch("/inventory/{inventory_id}")
+def update_inventory(inventory_id: int, inventory: InventoryUpdate):
+
+    updates = inventory.model_dump(exclude_unset=True)
+
+    if not updates:
+        raise HTTPException(
+            status_code=400,
+            detail="No fields provided for update"
+        )
+
+    set_clause = ", ".join(
+        f"{field} = :{field}" for field in updates
+    )
+
+    query = text(f"""
+        UPDATE inventory
+        SET {set_clause},
+            last_updated = CURRENT_TIMESTAMP
+        WHERE inventory_id = :inventory_id
+        RETURNING *
+    """)
+
+    updates["inventory_id"] = inventory_id
+
+    with engine.begin() as connection:
+        result = connection.execute(query, updates)
+        updated_inventory = result.mappings().one_or_none()
+
+        if updated_inventory is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Inventory record not found"
+            )
+
+    return {
+        "message": "Inventory updated successfully",
+        "inventory": dict(updated_inventory)
+    }
+
+@app.get("/orders")
+def get_orders():
+
+    query = text("""
+        SELECT
+            o.order_id,
+            o.customer_name,
+            o.order_date,
+            o.status,
+            COALESCE(
+                SUM(oi.quantity * oi.unit_price),
+                0
+            ) AS total_amount
+        FROM orders o
+        LEFT JOIN order_items oi
+            ON o.order_id = oi.order_id
+        GROUP BY
+            o.order_id,
+            o.customer_name,
+            o.order_date,
+            o.status
+        ORDER BY o.order_id
+    """)
+
+    with engine.connect() as connection:
+        result = connection.execute(query)
+        orders = result.mappings().all()
+
+    return {
+        "total": len(orders),
+        "orders": [dict(order) for order in orders]
+    }
+
+@app.get("/orders/{order_id}")
+def get_order(order_id: int):
+
+    query = text("""
+        SELECT
+            o.order_id,
+            o.customer_name,
+            o.order_date,
+            o.status,
+            p.product_name,
+            oi.quantity,
+            oi.unit_price,
+            (oi.quantity * oi.unit_price) AS subtotal
+        FROM orders o
+        LEFT JOIN order_items oi
+            ON o.order_id = oi.order_id
+        LEFT JOIN products p
+            ON oi.product_id = p.product_id
+        WHERE o.order_id = :order_id
+        ORDER BY oi.order_item_id
+    """)
+
+    with engine.connect() as connection:
+        result = connection.execute(
+            query,
+            {"order_id": order_id}
+        )
+        order_items = result.mappings().all()
+
+    if not order_items:
+        raise HTTPException(
+            status_code=404,
+            detail="Order not found"
+        )
+
+    first_item = order_items[0]
+
+    total_amount = sum(
+        (item["subtotal"] or 0) for item in order_items
+    )
+
+    return {
+        "order_id": first_item["order_id"],
+        "customer_name": first_item["customer_name"],
+        "order_date": first_item["order_date"],
+        "status": first_item["status"],
+        "items": [
+            {
+                "product_name": item["product_name"],
+                "quantity": item["quantity"],
+                "unit_price": item["unit_price"],
+                "subtotal": item["subtotal"]
+            }
+            for item in order_items
+            if item["product_name"] is not None
+        ],
+        "total_amount": total_amount
+    }
+@app.post("/orders", status_code=201)
+def create_order(order: OrderCreate):
+    query = text("""
+    INSERT INTO orders (customer_name)
+    VALUES (:customer_name)
+    RETURNING *
+    """)
+    with engine.begin() as connection:
+        result = connection.execute(
+            query,
+            {"customer_name": order.customer_name}
+        )
+
+        new_order = result.mappings().one()
+
+    return {
+        "message": "Order created successfully",
+        "order": dict(new_order)
+    }
+
