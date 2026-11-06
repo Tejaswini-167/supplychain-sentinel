@@ -1,4 +1,5 @@
 from pydantic import BaseModel, Field, EmailStr
+from pydantic import model_validator
 
 
 class SupplierCreate(BaseModel):
@@ -110,3 +111,14 @@ class OrderItemCreate(BaseModel):
 class OrderCreate(BaseModel):
     customer_name: str = Field(min_length=2, max_length=150)
     items: list[OrderItemCreate] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def check_duplicate_products(self):
+        product_ids = [
+            item.product_id for item in self.items
+        ]
+
+        if len(product_ids) != len(set(product_ids)):
+            raise ValueError("Duplicate product IDs are not allowed")
+
+        return self

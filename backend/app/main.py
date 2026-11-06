@@ -6,6 +6,7 @@ from app.schemas import ( SupplierCreate, SupplierUpdate, ProductCreate, Product
                           InventoryCreate, InventoryUpdate,OrderCreate)
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
+from decimal import Decimal
 
 app = FastAPI(
     title="SupplyChain Sentinel API",
@@ -593,9 +594,122 @@ def create_order(order: OrderCreate):
         )
 
         new_order = result.mappings().one()
+        item_query = text("""
+        INSERT INTO order_items
+            (order_id, product_id, quantity, unit_price)
+        VALUES
+            (:order_id, :product_id, :quantity, :unit_price)
+        RETURNING *
+       """)
+
+        price_query = text("""
+        SELECT unit_price
+     FROM products
+    WHERE product_id = :product_id
+""")
+        stock_query = text("""
+    SELECT quantity_on_hand
+    FROM inventory
+    WHERE product_id = :product_id
+    FOR UPDATE
+""")
+        update_stock_query = text("""
+    UPDATE inventory
+    SET quantity_on_hand = quantity_on_hand - :quantity,
+        last_updated = CURRENT_TIMESTAMP
+    WHERE product_id = :product_id
+AND quantity_on_hand >= :quantity
+""")
+        order_item_results = []
+        sorted_items = sorted(
+    order.items,
+    key=lambda item: item.product_id
+)
+
+        for item in sorted_items:
+
+            price_result = connection.execute(
+                price_query,
+                {"product_id": item.product_id}
+            )
+
+            product = price_result.mappings().one_or_none()
+
+            if product is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Product with ID {item.product_id} not found"
+                )
+
+            unit_price = product["unit_price"]
+
+            stock_result = connection.execute(
+                stock_query,
+                {"product_id": item.product_id}
+            )
+
+            stock = stock_result.mappings().one_or_none()
+
+            if stock is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Inventory not found for product ID {item.product_id}"
+                )
+
+            available_quantity = stock["quantity_on_hand"]
+
+            if available_quantity < item.quantity:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Insufficient stock for product ID {item.product_id}. "
+                        f"Available: {available_quantity}, "
+                        f"Requested: {item.quantity}"
+                    )
+                )
+
+            item_result = connection.execute(
+                item_query,
+                {
+                    "order_id": new_order["order_id"],
+                    "product_id": item.product_id,
+                    "quantity": item.quantity,
+                    "unit_price": unit_price
+                }
+            )
+
+
+            stock_update_result = connection.execute(
+                update_stock_query,
+                {
+                    "quantity": item.quantity,
+                    "product_id": item.product_id
+                }
+            )
+
+            if stock_update_result.rowcount == 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Unable to update stock for product ID {item.product_id}"
+                )
+
+            created_item = item_result.mappings().one()
+            order_item_results.append(dict(created_item))
+
+        total_amount = sum(
+            (
+                item["quantity"] * item["unit_price"]
+                for item in order_item_results
+            ),
+            Decimal("0.00")
+        )
+
+
 
     return {
         "message": "Order created successfully",
-        "order": dict(new_order)
+        "order": dict(new_order),
+        "items": order_item_results,
+        "total_amount": total_amount
     }
 
