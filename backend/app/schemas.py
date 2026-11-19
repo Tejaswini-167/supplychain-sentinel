@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field, EmailStr
 from pydantic import model_validator
+from typing import Literal
 
 
 class SupplierCreate(BaseModel):
@@ -122,3 +123,13 @@ class OrderCreate(BaseModel):
             raise ValueError("Duplicate product IDs are not allowed")
 
         return self
+
+class OrderStatusUpdate(BaseModel):
+    status: Literal[
+        "Pending",
+        "Confirmed",
+        "Processing",
+        "Shipped",
+        "Delivered",
+        "Cancelled"
+    ]

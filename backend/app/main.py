@@ -707,9 +707,79 @@ AND quantity_on_hand >= :quantity
 
 
     return {
+
         "message": "Order created successfully",
         "order": dict(new_order),
         "items": order_item_results,
         "total_amount": total_amount
+    }
+@app.patch("/orders/{order_id}")
+def update_order_status(
+    order_id: int,
+    order_update: OrderStatusUpdate
+):
+    with engine.begin() as connection:
+
+        check_query = text("""
+            SELECT status
+            FROM orders
+            WHERE order_id = :order_id
+            FOR UPDATE
+        """)
+
+        result = connection.execute(
+            check_query,
+            {"order_id": order_id}
+        )
+
+        existing_order = result.mappings().one_or_none()
+
+        if existing_order is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Order not found"
+            )
+
+        current_status = existing_order["status"]
+        new_status = order_update.status
+
+        allowed_transitions = {
+            "Pending": ["Confirmed", "Cancelled"],
+            "Confirmed": ["Processing", "Cancelled"],
+            "Processing": ["Shipped", "Cancelled"],
+            "Shipped": ["Delivered"],
+            "Delivered": [],
+            "Cancelled": []
+        }
+
+        if new_status not in allowed_transitions[current_status]:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Cannot change order status "
+                    f"from {current_status} to {new_status}"
+                )
+            )
+
+        update_query = text("""
+            UPDATE orders
+            SET status = :status
+            WHERE order_id = :order_id
+            RETURNING *
+        """)
+
+        update_result = connection.execute(
+            update_query,
+            {
+                "status": new_status,
+                "order_id": order_id
+            }
+        )
+
+        updated_order = update_result.mappings().one()
+
+    return {
+        "message": "Order status updated successfully",
+        "order": dict(updated_order)
     }
 
